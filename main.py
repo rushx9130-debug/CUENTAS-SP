@@ -153,6 +153,15 @@ def init_db():
     logger.info(f"✅ DB lista: {DB_PATH}")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+def md_escape(text: str) -> str:
+    """Escape Markdown v1 special characters in user-supplied strings."""
+    if not text:
+        return ""
+    # Characters that break Telegram's Markdown (v1) parser
+    for ch in ("\\", "`", "*", "_", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
 def get_user(uid):
     with get_conn() as c:
         return c.execute("SELECT * FROM usuarios WHERE user_id=?", (uid,)).fetchone()
@@ -318,7 +327,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     ensure_user(u.id, u.username, u.full_name)
     await update.message.reply_text(
-        f"👋 Hola *{u.first_name}*!\n\nBienvenido al bot de cuentas. Usa los botones para navegar.",
+        f"👋 Hola *{md_escape(u.first_name)}*!\n\nBienvenido al bot de cuentas. Usa los botones para navegar.",
         parse_mode="Markdown",
         reply_markup=kb_usuario()
     )
@@ -425,8 +434,10 @@ async def cb_pedir_tipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             (uid, "compra", -precio, f"Cuenta {tipo}")
         )
 
-    garantia     = (cuenta["nombre_user"] or "").strip()
+    garantia     = md_escape((cuenta["nombre_user"] or "").strip())
     garantia_txt = f"👤 *Nombre de usuario para garantía*\n`{garantia}`\n\n" if garantia else ""
+    correo_val   = md_escape(cuenta['correo'] if 'correo' in cuenta.keys() else cuenta['email'])
+    contrasena_val = md_escape(cuenta['contrasena'] or "")
 
     msg = (
         f"✅ *¡Cuenta entregada!*\n\n"
@@ -434,8 +445,8 @@ async def cb_pedir_tipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📦 Cuenta *{t['nombre']} {t['dias']} días*\n\n"
         f"📅 Fin  `{ff}`\n\n"
         + garantia_txt +
-        f"📧 Correo:\n`{(cuenta['correo'] if 'correo' in cuenta.keys() else cuenta['email'])}`\n\n"
-        f"🔒 Contraseña\n`{cuenta['contrasena']}`\n"
+        f"📧 Correo:\n`{correo_val}`\n\n"
+        f"🔒 Contraseña\n`{contrasena_val}`\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
     await q.edit_message_text(
@@ -456,14 +467,14 @@ async def cb_mis_cuentas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = []
     for cu in cuentas:
         t = TIPOS.get(cu["tipo"], {})
-        garantia_txt = f"👤 `{cu['nombre_user']}`\n" if cu["nombre_user"] else ""
+        garantia_txt = f"👤 `{md_escape(cu['nombre_user'])}`\n" if cu["nombre_user"] else ""
         lines.append(
             f"{'—'*20}\n"
             f"{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')} días*\n"
             f"📅 Fin: `{cu['fecha_fin'] or 'N/A'}`\n"
             + garantia_txt +
-            f"📧 `{cu['correo']}`\n"
-            f"🔒 `{cu['contrasena']}`"
+            f"📧 `{md_escape(cu['correo'])}`\n"
+            f"🔒 `{md_escape(cu['contrasena'] or '')}`"
         )
     await q.edit_message_text(
         "📋 *Tus cuentas:*\n\n" + "\n".join(lines),
@@ -484,7 +495,7 @@ async def cb_menu_principal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.pop("esperando", None)
     ctx.user_data.pop("adm_esperando", None)
     await q.edit_message_text(
-        f"🏠 *Menú principal*\n\nHola *{q.from_user.first_name}*, elige una opción:",
+        f"🏠 *Menú principal*\n\nHola *{md_escape(q.from_user.first_name)}*, elige una opción:",
         parse_mode="Markdown",
         reply_markup=kb_usuario()
     )
@@ -619,7 +630,7 @@ async def adm_usuarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = []
     for u in users:
         estado = "🚫" if u["bloqueado"] else "✅"
-        uname  = f"@{u['username']}" if u["username"] else u["nombre"] or "N/A"
+        uname  = md_escape(f"@{u['username']}" if u["username"] else u["nombre"] or "N/A")
         lines.append(f"{estado} `{u['user_id']}` {uname} — `{fmt_precio(u['creditos'])}`")
     await q.edit_message_text(
         "👥 *Últimos 20 usuarios:*\n\n" + "\n".join(lines),
@@ -773,11 +784,11 @@ async def msg_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ).fetchall()
 
         estado = "🚫 Bloqueado" if u["bloqueado"] else "✅ Activo"
-        uname  = f"@{u['username']}" if u["username"] else "sin username"
+        uname  = md_escape(f"@{u['username']}" if u["username"] else "sin username")
         info   = (
             f"🔍 *Perfil del usuario*\n\n"
             f"🆔 ID: `{u['user_id']}`\n"
-            f"👤 {u['nombre'] or 'N/A'} ({uname})\n"
+            f"👤 {md_escape(u['nombre'] or 'N/A')} ({uname})\n"
             f"💵 Créditos: `{fmt_precio(u['creditos'])}`\n"
             f"📅 Registrado: `{u['creado_en']}`\n"
             f"Estado: {estado}\n"
@@ -787,13 +798,13 @@ async def msg_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             info += "\n*📋 Cuentas:*\n"
             for cu in cuentas[:10]:
                 t = TIPOS.get(cu["tipo"], {})
-                garantia_txt = f"   👤 `{cu['nombre_user']}`\n" if cu["nombre_user"] else ""
+                garantia_txt = f"   👤 `{md_escape(cu['nombre_user'])}`\n" if cu["nombre_user"] else ""
                 info += (
                     f"\n{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')}d* | "
                     f"Fin: `{cu['fecha_fin'] or 'N/A'}`\n"
                     + garantia_txt +
-                    f"   📧 `{(cu['correo'] if 'correo' in cu.keys() else cu['email'])}`\n"
-                    f"   🔒 `{cu['contrasena']}`\n"
+                    f"   📧 `{md_escape(cu['correo'] if 'correo' in cu.keys() else cu['email'])}`\n"
+                    f"   🔒 `{md_escape(cu['contrasena'] or '')}`\n"
                 )
         btns = [
             [InlineKeyboardButton(
