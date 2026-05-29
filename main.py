@@ -176,12 +176,25 @@ def parsear_y_guardar_cuentas(texto):
             passw    = parts[2] if len(parts) > 2 else PASSWORD
             try:
                 with get_conn() as c:
+                    # asegurar columnas antes de insertar
+                    _cols = [r[1] for r in c.execute("PRAGMA table_info(cuentas)").fetchall()]
+                    for _col, _tipo_col, _def in [
+                        ("nombre_user",   "TEXT",    ""),
+                        ("entregado",     "INTEGER", "0"),
+                        ("entregado_a",   "INTEGER", ""),
+                        ("fecha_entrega", "TEXT",    ""),
+                        ("fecha_fin",     "TEXT",    ""),
+                    ]:
+                        if _col not in _cols:
+                            _dsql = f" DEFAULT {_def}" if _def != "" else ""
+                            c.execute(f"ALTER TABLE cuentas ADD COLUMN {_col} TEXT{_dsql}")
                     c.execute(
                         "INSERT INTO cuentas(tipo,correo,contrasena,nombre_user) VALUES(?,?,?,?)",
                         (tipo_actual, correo, passw, nombre_u)
                     )
                 insertadas += 1
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error insertando cuenta: {e}")
                 errores += 1
     if insertadas == 0 and errores == 0:
         return "⚠️ No se encontraron cuentas válidas."
