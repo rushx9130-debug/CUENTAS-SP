@@ -117,13 +117,6 @@ def init_db():
             cols_c = [r[1] for r in c.execute("PRAGMA table_info(cuentas)").fetchall()]
             logger.info("✅ Columna renombrada: email → correo")
 
-        # Eliminar filas con dominio gowtherxax.com (datos basura)
-        deleted = c.execute(
-            "DELETE FROM cuentas WHERE correo LIKE '%gowtherxax.com%'"
-        ).rowcount
-        if deleted:
-            logger.info(f"🗑️ Eliminadas {deleted} cuenta(s) con dominio gowtherxax.com")
-
         # Migración tabla cuentas: agregar columnas faltantes si no existen
         cols_c = [r[1] for r in c.execute("PRAGMA table_info(cuentas)").fetchall()]
         migraciones_cuentas = [
