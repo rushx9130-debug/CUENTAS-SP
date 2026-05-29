@@ -207,6 +207,9 @@ def parsear_y_guardar_cuentas(texto):
             with get_conn() as c:
                 cols = {r[1]: r[2].upper() for r in c.execute("PRAGMA table_info(cuentas)").fetchall()}
                 migraciones = [
+                    ("tipo", "TEXT", None),
+                    ("correo", "TEXT", None),
+                    ("contrasena", "TEXT", f"'{PASSWORD}'"),
                     ("nombre_user", "TEXT", None),
                     ("entregado", "INTEGER", "0"),
                     ("entregado_a", "INTEGER", None),
