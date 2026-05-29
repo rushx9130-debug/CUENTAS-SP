@@ -1,903 +1,817 @@
-#!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════╗
-║     BOT DE CUENTAS — TELEGRAM BOT            ║
-║   Sistema de entrega con créditos por llave  ║
-╚══════════════════════════════════════════════╝
-
-Variables de entorno necesarias:
-  BOT_TOKEN   → Token del bot (BotFather)
-  ADMIN_ID    → Tu Telegram ID (usa @userinfobot)
-  DB_PATH     → (opcional) Ruta de la DB. Default: /data/bot.db
-"""
-
-import os
-import logging
-import sqlite3
-import random
-import string
-from functools import wraps
-from typing import Optional
-
+import os, re, logging, secrets, string
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
+import sqlite3
 
-# ═══════════════════════════════════════════════
-#  CONFIGURACIÓN
-# ═══════════════════════════════════════════════
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID  = int(os.environ.get("ADMIN_ID", "0"))
-DB_PATH   = os.environ.get("DB_PATH", "/data/bot.db")
-
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-EMOJIS = {"individual": "👤", "familiar": "👨‍👩‍👧‍👦"}
+BOT_TOKEN = os.getenv("BOT_TOKEN", "TU_TOKEN_AQUI")
+ADMIN_ID  = int(os.getenv("ADMIN_ID", "0"))
+DB_PATH   = os.getenv("DB_PATH", "bot.db")
+PASSWORD  = "Gowther2026"
 
+TIPOS = {
+    "individual_30": {"nombre": "INDIVIDUAL", "dias": 30,  "emoji": "👤"},
+    "individual_90": {"nombre": "INDIVIDUAL", "dias": 90,  "emoji": "👤"},
+    "familiar_30":   {"nombre": "FAMILIAR",   "dias": 30,  "emoji": "👨‍👩‍👧‍👦"},
+    "dual_30":       {"nombre": "DUAL",       "dias": 30,  "emoji": "👥"},
+    "dual_90":       {"nombre": "DUAL",       "dias": 90,  "emoji": "👥"},
+}
 
-# ═══════════════════════════════════════════════
-#  BASE DE DATOS
-# ═══════════════════════════════════════════════
-def get_conn() -> sqlite3.Connection:
+# ─── DB ───────────────────────────────────────────────────────────────────────
+def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-
-def init_db() -> None:
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-
-    with get_conn() as conn:
-        conn.executescript("""
+def init_db():
+    with get_conn() as c:
+        c.executescript("""
         CREATE TABLE IF NOT EXISTS usuarios (
-            user_id       INTEGER PRIMARY KEY,
-            username      TEXT    NOT NULL DEFAULT '',
-            nombre        TEXT    NOT NULL DEFAULT '',
-            creditos      INTEGER NOT NULL DEFAULT 0,
-            total_pedidos INTEGER NOT NULL DEFAULT 0,
-            bloqueado     INTEGER NOT NULL DEFAULT 0,
-            creado_en     TEXT    NOT NULL DEFAULT (datetime('now'))
+            user_id   INTEGER PRIMARY KEY,
+            username  TEXT,
+            nombre    TEXT,
+            creditos  REAL DEFAULT 0,
+            bloqueado INTEGER DEFAULT 0,
+            creado_en TEXT DEFAULT (datetime('now'))
         );
-
-        CREATE TABLE IF NOT EXISTS llaves (
-            llave      TEXT    PRIMARY KEY,
-            creditos   INTEGER NOT NULL,
-            nota       TEXT,
-            usada      INTEGER NOT NULL DEFAULT 0,
-            usada_por  INTEGER,
-            creada_en  TEXT    NOT NULL DEFAULT (datetime('now')),
-            usada_en   TEXT
-        );
-
         CREATE TABLE IF NOT EXISTS cuentas (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            tipo        TEXT    NOT NULL,
-            email       TEXT    NOT NULL,
-            password    TEXT    NOT NULL,
-            asignada    INTEGER NOT NULL DEFAULT 0,
-            asignada_a  INTEGER,
-            asignada_en TEXT,
-            agregada_en TEXT    NOT NULL DEFAULT (datetime('now'))
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo          TEXT,
+            correo        TEXT,
+            contrasena    TEXT DEFAULT 'Gowther2026',
+            nombre_user   TEXT,
+            entregado     INTEGER DEFAULT 0,
+            entregado_a   INTEGER,
+            fecha_entrega TEXT,
+            fecha_fin     TEXT,
+            creado_en     TEXT DEFAULT (datetime('now'))
         );
-
         CREATE TABLE IF NOT EXISTS precios (
-            tipo        TEXT    PRIMARY KEY,
-            precio      INTEGER NOT NULL,
-            descripcion TEXT    NOT NULL DEFAULT ''
+            tipo   TEXT PRIMARY KEY,
+            precio REAL
         );
-
-        CREATE TABLE IF NOT EXISTS historial (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL,
-            tipo            TEXT    NOT NULL,
-            cuenta_id       INTEGER NOT NULL,
-            creditos_usados INTEGER NOT NULL,
-            fecha           TEXT    NOT NULL DEFAULT (datetime('now'))
+        CREATE TABLE IF NOT EXISTS llaves (
+            llave     TEXT PRIMARY KEY,
+            creditos  REAL,
+            nota      TEXT,
+            usada     INTEGER DEFAULT 0,
+            usada_por INTEGER,
+            usada_en  TEXT
         );
+        CREATE TABLE IF NOT EXISTS transacciones (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            tipo    TEXT,
+            monto   REAL,
+            desc    TEXT,
+            fecha   TEXT DEFAULT (datetime('now'))
+        );
+        INSERT OR IGNORE INTO precios VALUES ('individual_30', 1.25);
+        INSERT OR IGNORE INTO precios VALUES ('individual_90', 3.00);
+        INSERT OR IGNORE INTO precios VALUES ('familiar_30',   2.00);
+        INSERT OR IGNORE INTO precios VALUES ('dual_30',       1.50);
+        INSERT OR IGNORE INTO precios VALUES ('dual_90',       3.50);
         """)
+    logger.info(f"✅ DB lista: {DB_PATH}")
 
-        # Precios por defecto (se pueden cambiar con /setprecio)
-        conn.execute(
-            "INSERT OR IGNORE INTO precios VALUES ('individual', 50, 'Cuenta Individual — 1 usuario')"
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO precios VALUES ('familiar', 100, 'Cuenta Familiar — hasta 6 usuarios')"
-        )
-        conn.commit()
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def get_user(uid):
+    with get_conn() as c:
+        return c.execute("SELECT * FROM usuarios WHERE user_id=?", (uid,)).fetchone()
 
-    logger.info("✅ Base de datos lista: %s", DB_PATH)
+def ensure_user(uid, username, nombre):
+    with get_conn() as c:
+        c.execute("INSERT OR IGNORE INTO usuarios(user_id,username,nombre) VALUES(?,?,?)",
+                  (uid, username or "", nombre or ""))
 
+def get_precio(tipo):
+    with get_conn() as c:
+        r = c.execute("SELECT precio FROM precios WHERE tipo=?", (tipo,)).fetchone()
+        return r["precio"] if r else None
 
-# ═══════════════════════════════════════════════
-#  HELPERS
-# ═══════════════════════════════════════════════
-def generar_llave(longitud: int = 16) -> str:
-    """Genera una llave aleatoria única."""
-    chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=longitud))
+def stock_libre(tipo):
+    with get_conn() as c:
+        r = c.execute("SELECT COUNT(*) AS n FROM cuentas WHERE tipo=? AND entregado=0", (tipo,)).fetchone()
+        return r["n"]
 
+def fmt_precio(p):
+    return f"${p:.2f}"
 
-def registrar_si_nuevo(user) -> None:
-    """Crea el registro del usuario si aún no existe."""
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO usuarios (user_id, username, nombre) VALUES (?,?,?)",
-            (user.id, user.username or "", user.full_name),
-        )
-        conn.commit()
+def fecha_fin_str(dias):
+    return (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
 
+def parsear_y_guardar_cuentas(texto):
+    tipo_actual = None
+    insertadas  = 0
+    errores     = 0
+    tipo_map = {
+        "individual": "individual_90",
+        "familiar":   "familiar_30",
+        "dual":       "dual_90",
+    }
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        linea_lower = linea.lower()
+        # detectar cabecera de tipo
+        if linea_lower in TIPOS:
+            tipo_actual = linea_lower
+            continue
+        matched = False
+        for k, v in tipo_map.items():
+            if linea_lower == k:
+                tipo_actual = v
+                matched = True
+                break
+        if matched:
+            continue
+        # línea de cuenta
+        if tipo_actual and ("@" in linea or re.match(r'\S+@\S+', linea)):
+            parts    = linea.split()
+            correo   = parts[0]
+            nombre_u = parts[1] if len(parts) > 1 else ""
+            passw    = parts[2] if len(parts) > 2 else PASSWORD
+            try:
+                with get_conn() as c:
+                    c.execute(
+                        "INSERT INTO cuentas(tipo,correo,contrasena,nombre_user) VALUES(?,?,?,?)",
+                        (tipo_actual, correo, passw, nombre_u)
+                    )
+                insertadas += 1
+            except Exception:
+                errores += 1
+    if insertadas == 0 and errores == 0:
+        return "⚠️ No se encontraron cuentas válidas."
+    return f"✅ *{insertadas}* cuenta(s) agregada(s)" + (f"\n⚠️ {errores} error(es)" if errores else "")
 
-def get_creditos(user_id: int) -> int:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT creditos FROM usuarios WHERE user_id=?", (user_id,)
-        ).fetchone()
-    return row["creditos"] if row else 0
+# ═══════════════════════════════════════════════════════════════════════════════
+# TECLADOS
+# ═══════════════════════════════════════════════════════════════════════════════
+def kb_usuario():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Mis créditos",    callback_data="mis_creditos"),
+         InlineKeyboardButton("🏪 Precios & stock",  callback_data="ver_precios")],
+        [InlineKeyboardButton("📦 Pedir cuenta",     callback_data="pedir_menu"),
+         InlineKeyboardButton("📋 Mis cuentas",      callback_data="mis_cuentas")],
+        [InlineKeyboardButton("🔑 Canjear llave",    callback_data="canjear_prompt")],
+    ])
 
+def kb_admin():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Generar llave",   callback_data="adm_genkey"),
+         InlineKeyboardButton("📋 Ver llaves",       callback_data="adm_llaves")],
+        [InlineKeyboardButton("➕ Agregar cuentas",  callback_data="adm_addcuenta"),
+         InlineKeyboardButton("📦 Stock",            callback_data="adm_stock")],
+        [InlineKeyboardButton("💵 Precios",          callback_data="adm_precios"),
+         InlineKeyboardButton("👥 Usuarios",         callback_data="adm_usuarios")],
+        [InlineKeyboardButton("🔍 Buscar usuario",   callback_data="adm_buscar"),
+         InlineKeyboardButton("📊 Estadísticas",     callback_data="adm_stats")],
+        [InlineKeyboardButton("💬 Broadcast",        callback_data="adm_broadcast"),
+         InlineKeyboardButton("💰 Dar créditos",     callback_data="adm_creditos")],
+        [InlineKeyboardButton("🚫 Bloquear usuario", callback_data="adm_bloquear")],
+    ])
 
-def get_precio(tipo: str) -> Optional[int]:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT precio FROM precios WHERE tipo=?", (tipo,)
-        ).fetchone()
-    return row["precio"] if row else None
+def kb_volver_usuario():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]])
 
+def kb_volver_admin():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Volver", callback_data="adm_back")]])
 
-def is_bloqueado(user_id: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT bloqueado FROM usuarios WHERE user_id=?", (user_id,)
-        ).fetchone()
-    return bool(row and row["bloqueado"])
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMANDOS PRINCIPALES
+# ═══════════════════════════════════════════════════════════════════════════════
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    ensure_user(u.id, u.username, u.full_name)
+    await update.message.reply_text(
+        f"👋 Hola *{u.first_name}*!\n\nBienvenido al bot de cuentas. Usa los botones para navegar.",
+        parse_mode="Markdown",
+        reply_markup=kb_usuario()
+    )
 
-
-def admin_only(func):
-    """Decorador: solo el admin puede usar estos comandos."""
-    @wraps(func)
-    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("❌ No tienes permiso para usar este comando.")
-            return
-        return await func(update, ctx)
-    return wrapper
-
-
-# ═══════════════════════════════════════════════
-#  CORE — ENTREGA DE CUENTAS
-# ═══════════════════════════════════════════════
-async def _entregar_cuenta(target, user_id: int, tipo: str) -> None:
-    """
-    Verifica créditos, descuenta y entrega una cuenta disponible.
-    `target` puede ser un Message o CallbackQuery.message.
-    """
-    if is_bloqueado(user_id):
-        await target.reply_text("🚫 Tu acceso ha sido suspendido. Contacta al administrador.")
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ No autorizado.")
         return
+    await update.message.reply_text(
+        "🛡️ *Panel de Administración*\n\nElige una acción:",
+        parse_mode="Markdown",
+        reply_markup=kb_admin()
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CALLBACKS — USUARIO
+# ═══════════════════════════════════════════════════════════════════════════════
+async def cb_mis_creditos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    u = get_user(q.from_user.id)
+    creditos = u["creditos"] if u else 0
+    await q.edit_message_text(
+        f"💰 *Tus créditos:* `{fmt_precio(creditos)}`",
+        parse_mode="Markdown",
+        reply_markup=kb_volver_usuario()
+    )
+
+async def cb_ver_precios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    with get_conn() as c:
+        precios = c.execute("SELECT tipo, precio FROM precios ORDER BY tipo").fetchall()
+    lines = []
+    for p in precios:
+        t     = TIPOS.get(p["tipo"], {})
+        stock = stock_libre(p["tipo"])
+        lines.append(
+            f"{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')} días*\n"
+            f"   💵 `{fmt_precio(p['precio'])}` | 📦 Stock: `{stock}`"
+        )
+    texto = "🏪 *Precios y Stock*\n\n" + "\n\n".join(lines) if lines else "Sin precios configurados."
+    await q.edit_message_text(texto, parse_mode="Markdown", reply_markup=kb_volver_usuario())
+
+async def cb_pedir_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    btns = []
+    for tipo, info in TIPOS.items():
+        precio = get_precio(tipo)
+        stock  = stock_libre(tipo)
+        label  = f"{info['emoji']} {info['nombre']} {info['dias']}d — {fmt_precio(precio)} ({stock} disp.)"
+        btns.append([InlineKeyboardButton(label, callback_data=f"pedir_{tipo}")])
+    btns.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
+    await q.edit_message_text(
+        "📦 *¿Qué tipo de cuenta quieres?*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(btns)
+    )
+
+async def cb_pedir_tipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q    = update.callback_query; await q.answer()
+    tipo = q.data.replace("pedir_", "")
+    uid  = q.from_user.id
+    u    = get_user(uid)
+
+    if not u:
+        await q.answer("❌ Usuario no encontrado.", show_alert=True); return
+    if u["bloqueado"]:
+        await q.answer("🚫 Estás bloqueado.", show_alert=True); return
 
     precio = get_precio(tipo)
     if precio is None:
-        await target.reply_text("❌ Tipo de cuenta no disponible.")
-        return
+        await q.answer("❌ Tipo no configurado.", show_alert=True); return
 
-    creditos = get_creditos(user_id)
-    if creditos < precio:
-        falta = precio - creditos
-        await target.reply_text(
+    if u["creditos"] < precio:
+        await q.edit_message_text(
             f"❌ *Créditos insuficientes*\n\n"
-            f"💳 Tienes: *{creditos} créditos*\n"
-            f"💲 Precio {tipo}: *{precio} créditos*\n"
-            f"📉 Te faltan: *{falta} créditos*\n\n"
-            f"Solicita una llave de recarga al administrador.",
+            f"Necesitas `{fmt_precio(precio)}` y tienes `{fmt_precio(u['creditos'])}`.",
             parse_mode="Markdown",
-        )
-        return
+            reply_markup=kb_volver_usuario()
+        ); return
 
-    with get_conn() as conn:
-        cuenta = conn.execute(
-            "SELECT id, email, password FROM cuentas WHERE tipo=? AND asignada=0 LIMIT 1",
-            (tipo,),
+    if stock_libre(tipo) == 0:
+        await q.edit_message_text(
+            "😔 *Sin stock disponible* para este tipo por ahora.",
+            parse_mode="Markdown",
+            reply_markup=kb_volver_usuario()
+        ); return
+
+    t  = TIPOS[tipo]
+    ff = fecha_fin_str(t["dias"])
+
+    with get_conn() as c:
+        cuenta = c.execute(
+            "SELECT * FROM cuentas WHERE tipo=? AND entregado=0 LIMIT 1", (tipo,)
         ).fetchone()
-
         if not cuenta:
-            await target.reply_text(
-                f"⚠️ *Sin stock* de cuentas *{tipo}* en este momento.\n"
-                "Avisa al administrador para que agregue más.",
-                parse_mode="Markdown",
-            )
-            return
-
-        # Asignar cuenta + descontar créditos + registrar historial
-        conn.execute(
-            "UPDATE cuentas SET asignada=1, asignada_a=?, asignada_en=datetime('now') WHERE id=?",
-            (user_id, cuenta["id"]),
+            await q.answer("Stock agotado.", show_alert=True); return
+        c.execute(
+            "UPDATE cuentas SET entregado=1, entregado_a=?, fecha_entrega=datetime('now'), fecha_fin=? WHERE id=?",
+            (uid, ff, cuenta["id"])
         )
-        conn.execute(
-            "UPDATE usuarios SET creditos=creditos-?, total_pedidos=total_pedidos+1 WHERE user_id=?",
-            (precio, user_id),
+        c.execute("UPDATE usuarios SET creditos=creditos-? WHERE user_id=?", (precio, uid))
+        c.execute(
+            "INSERT INTO transacciones(user_id,tipo,monto,desc) VALUES(?,?,?,?)",
+            (uid, "compra", -precio, f"Cuenta {tipo}")
         )
-        conn.execute(
-            "INSERT INTO historial (user_id, tipo, cuenta_id, creditos_usados) VALUES (?,?,?,?)",
-            (user_id, tipo, cuenta["id"], precio),
-        )
-        conn.commit()
 
-    emoji      = EMOJIS.get(tipo, "📦")
-    nuevo_saldo = get_creditos(user_id)
+    garantia     = (cuenta["nombre_user"] or "").strip()
+    garantia_txt = f"👤 *Nombre de usuario para garantía*\n`{garantia}`\n\n" if garantia else ""
 
-    await target.reply_text(
+    msg = (
         f"✅ *¡Cuenta entregada!*\n\n"
-        f"{emoji} Tipo: *{tipo.capitalize()}*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📧 Email:    `{cuenta['email']}`\n"
-        f"🔒 Password: `{cuenta['password']}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 Créditos restantes: *{nuevo_saldo}*\n\n"
-        f"⚠️ Guarda estos datos en un lugar seguro.",
-        parse_mode="Markdown",
+        f"📦 Cuenta *{t['nombre']} {t['dias']} días*\n\n"
+        f"📅 Fin  `{ff}`\n\n"
+        + garantia_txt +
+        f"📧 Correo:\n`{cuenta['correo']}`\n\n"
+        f"🔒 Contraseña\n`{cuenta['contrasena']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    await q.edit_message_text(
+        msg, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="menu_principal")]])
     )
 
-
-# ═══════════════════════════════════════════════
-#  COMANDOS — USUARIOS
-# ═══════════════════════════════════════════════
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    registrar_si_nuevo(user)
-
-    if is_bloqueado(user.id):
-        await update.message.reply_text("🚫 Tu acceso ha sido suspendido.")
-        return
-
-    creditos = get_creditos(user.id)
-    kb = [
-        [
-            InlineKeyboardButton("💳 Mis Créditos",  callback_data="ver_creditos"),
-            InlineKeyboardButton("💰 Precios",       callback_data="ver_precios"),
-        ],
-        [InlineKeyboardButton("🛒 Pedir Cuenta",     callback_data="menu_pedir")],
-        [InlineKeyboardButton("📋 Mis Cuentas",      callback_data="mis_cuentas")],
-    ]
-    await update.message.reply_text(
-        f"👋 ¡Hola, *{user.first_name}*!\n\n"
-        f"💳 Créditos disponibles: *{creditos}*\n\n"
-        f"📌 *Comandos:*\n"
-        f"🔑 `/canjear <LLAVE>` — Activar llave\n"
-        f"🛒 `/pedir individual` o `/pedir familiar`\n"
-        f"💳 `/creditos` — Ver mi saldo\n"
-        f"📋 `/miscuentas` — Ver mis cuentas\n"
-        f"💰 `/precios` — Ver precios y stock",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(kb),
-    )
-
-
-async def cmd_creditos(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    registrar_si_nuevo(user)
-    creds = get_creditos(user.id)
-    await update.message.reply_text(
-        f"💳 *Tu Saldo*\n\n"
-        f"Disponibles: *{creds} créditos*\n\n"
-        f"Para recargar:\n`/canjear <LLAVE>`",
-        parse_mode="Markdown",
-    )
-
-
-async def cmd_precios(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    with get_conn() as conn:
-        precios = conn.execute("SELECT tipo, precio, descripcion FROM precios").fetchall()
-        disp    = {
-            r["tipo"]: r["n"]
-            for r in conn.execute(
-                "SELECT tipo, COUNT(*) as n FROM cuentas WHERE asignada=0 GROUP BY tipo"
-            ).fetchall()
-        }
-
-    lines = ["💰 *Lista de Precios*\n"]
-    for p in precios:
-        emoji = EMOJIS.get(p["tipo"], "📦")
-        stock = disp.get(p["tipo"], 0)
-        lines.append(
-            f"{emoji} *{p['tipo'].capitalize()}*\n"
-            f"💲 {p['precio']} créditos\n"
-            f"📝 _{p['descripcion']}_\n"
-            f"📦 Stock: *{stock} disponible(s)*\n"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def cmd_canjear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    registrar_si_nuevo(user)
-
-    if is_bloqueado(user.id):
-        await update.message.reply_text("🚫 Tu acceso ha sido suspendido.")
-        return
-
-    if not ctx.args:
-        await update.message.reply_text(
-            "❌ Uso: `/canjear <LLAVE>`\n\nEjemplo: `/canjear ABC123XYZ456WXYZ`",
-            parse_mode="Markdown",
-        )
-        return
-
-    llave = ctx.args[0].upper().strip()
-
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT creditos, usada FROM llaves WHERE llave=?", (llave,)
-        ).fetchone()
-
-        if not row:
-            await update.message.reply_text("❌ Llave inválida. Verifica e intenta de nuevo.")
-            return
-
-        if row["usada"]:
-            await update.message.reply_text("❌ Esta llave ya fue canjeada anteriormente.")
-            return
-
-        creditos_llave = row["creditos"]
-
-        conn.execute(
-            "UPDATE llaves SET usada=1, usada_por=?, usada_en=datetime('now') WHERE llave=?",
-            (user.id, llave),
-        )
-        conn.execute(
-            "UPDATE usuarios SET creditos=creditos+? WHERE user_id=?",
-            (creditos_llave, user.id),
-        )
-        conn.commit()
-
-    nuevo_saldo = get_creditos(user.id)
-    await update.message.reply_text(
-        f"✅ *¡Llave canjeada exitosamente!*\n\n"
-        f"🎁 Recibiste: *+{creditos_llave} créditos*\n"
-        f"💳 Saldo actual: *{nuevo_saldo} créditos*",
-        parse_mode="Markdown",
-    )
-
-
-async def cmd_pedir(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    registrar_si_nuevo(user)
-
-    if is_bloqueado(user.id):
-        await update.message.reply_text("🚫 Tu acceso ha sido suspendido.")
-        return
-
-    if not ctx.args:
-        kb = [[
-            InlineKeyboardButton("👤 Individual", callback_data="pedir_individual"),
-            InlineKeyboardButton("👨‍👩‍👧‍👦 Familiar",  callback_data="pedir_familiar"),
-        ]]
-        await update.message.reply_text(
-            "🛒 *¿Qué tipo de cuenta deseas?*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb),
-        )
-        return
-
-    tipo = ctx.args[0].lower()
-    if tipo not in ("individual", "familiar"):
-        await update.message.reply_text(
-            "❌ Tipo inválido. Usa: `individual` o `familiar`", parse_mode="Markdown"
-        )
-        return
-
-    await _entregar_cuenta(update.message, user.id, tipo)
-
-
-async def cmd_miscuentas(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    with get_conn() as conn:
-        cuentas = conn.execute(
-            "SELECT tipo, email, password, asignada_en "
-            "FROM cuentas WHERE asignada_a=? ORDER BY asignada_en DESC",
-            (user.id,),
+async def cb_mis_cuentas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q   = update.callback_query; await q.answer()
+    uid = q.from_user.id
+    with get_conn() as c:
+        cuentas = c.execute(
+            "SELECT * FROM cuentas WHERE entregado_a=? ORDER BY fecha_entrega DESC LIMIT 10", (uid,)
         ).fetchall()
-
     if not cuentas:
-        await update.message.reply_text(
-            "📋 No tienes cuentas aún.\n\n"
-            "Usa `/pedir individual` o `/pedir familiar` para obtener una.",
-            parse_mode="Markdown",
-        )
-        return
+        await q.edit_message_text("📭 Aún no tienes cuentas.", reply_markup=kb_volver_usuario()); return
 
-    lines = [f"📋 *Tus Cuentas* ({len(cuentas)} total)\n"]
-    for i, c in enumerate(cuentas, 1):
-        emoji = EMOJIS.get(c["tipo"], "📦")
-        fecha = (c["asignada_en"] or "")[:10]
+    lines = []
+    for cu in cuentas:
+        t = TIPOS.get(cu["tipo"], {})
+        garantia_txt = f"👤 `{cu['nombre_user']}`\n" if cu["nombre_user"] else ""
         lines.append(
-            f"*{i}. {emoji} {c['tipo'].capitalize()}*\n"
-            f"📧 `{c['email']}`\n"
-            f"🔒 `{c['password']}`\n"
-            f"📅 {fecha}\n"
+            f"{'—'*20}\n"
+            f"{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')} días*\n"
+            f"📅 Fin: `{cu['fecha_fin'] or 'N/A'}`\n"
+            + garantia_txt +
+            f"📧 `{cu['correo']}`\n"
+            f"🔒 `{cu['contrasena']}`"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-# ═══════════════════════════════════════════════
-#  COMANDOS — ADMINISTRADOR
-# ═══════════════════════════════════════════════
-@admin_only
-async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🔧 *Panel de Administración*\n\n"
-        "🔑 *Llaves:*\n"
-        "`/genkey <créditos> [cantidad] [nota]`\n"
-        "`/llaves` — Ver llaves disponibles\n\n"
-        "📦 *Cuentas:*\n"
-        "`/addcuenta <tipo> <email> <pass>`\n"
-        "`/stock` — Ver inventario\n\n"
-        "💰 *Precios:*\n"
-        "`/setprecio <tipo> <precio>`\n\n"
-        "👥 *Usuarios:*\n"
-        "`/usuarios` — Listar usuarios\n"
-        "`/addcreditos <id> <cantidad>`\n"
-        "`/bloquear <id>` — Bloquear / desbloquear\n\n"
-        "📊 `/stats` — Estadísticas\n"
-        "📣 `/broadcast <mensaje>` — Mensaje a todos",
+    await q.edit_message_text(
+        "📋 *Tus cuentas:*\n\n" + "\n".join(lines),
         parse_mode="Markdown",
+        reply_markup=kb_volver_usuario()
     )
 
+async def cb_canjear_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data["esperando"] = "llave"
+    await q.edit_message_text(
+        "🔑 Envía tu llave de créditos:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="menu_principal")]])
+    )
 
-@admin_only
-async def cmd_genkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generar llaves de recarga. Uso: /genkey <créditos> [cantidad] [nota]"""
-    if not ctx.args:
-        await update.message.reply_text(
-            "❌ Uso: `/genkey <créditos> [cantidad] [nota]`\n\n"
-            "Ejemplos:\n"
-            "`/genkey 100` — 1 llave de 100 créditos\n"
-            "`/genkey 200 5` — 5 llaves de 200 créditos\n"
-            "`/genkey 500 3 VIP cliente` — 3 llaves con nota",
-            parse_mode="Markdown",
-        )
-        return
+async def cb_menu_principal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data.pop("esperando", None)
+    ctx.user_data.pop("adm_esperando", None)
+    await q.edit_message_text(
+        f"🏠 *Menú principal*\n\nHola *{q.from_user.first_name}*, elige una opción:",
+        parse_mode="Markdown",
+        reply_markup=kb_usuario()
+    )
 
-    try:
-        creditos = int(ctx.args[0])
-        cantidad = int(ctx.args[1]) if len(ctx.args) > 1 else 1
-        nota     = " ".join(ctx.args[2:]) if len(ctx.args) > 2 else None
-        assert creditos > 0 and 1 <= cantidad <= 50
-    except (ValueError, AssertionError):
-        await update.message.reply_text("❌ Valores inválidos. Máximo 50 llaves a la vez.")
-        return
+# ─── Mensajes usuario (canje llave) ──────────────────────────────────────────
+async def msg_usuario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
 
-    generadas = []
-    with get_conn() as conn:
-        for _ in range(cantidad):
-            # Garantizar unicidad
-            while True:
-                k = generar_llave()
-                if not conn.execute("SELECT 1 FROM llaves WHERE llave=?", (k,)).fetchone():
-                    break
-            conn.execute(
-                "INSERT INTO llaves (llave, creditos, nota) VALUES (?,?,?)",
-                (k, creditos, nota),
+    if ctx.user_data.get("esperando") == "llave":
+        ctx.user_data.pop("esperando", None)
+        with get_conn() as c:
+            llave = c.execute("SELECT * FROM llaves WHERE llave=? AND usada=0", (text,)).fetchone()
+            if not llave:
+                await update.message.reply_text("❌ Llave inválida o ya usada.", reply_markup=kb_usuario()); return
+            c.execute("UPDATE llaves SET usada=1, usada_por=?, usada_en=datetime('now') WHERE llave=?", (uid, text))
+            c.execute("UPDATE usuarios SET creditos=creditos+? WHERE user_id=?", (llave["creditos"], uid))
+            c.execute(
+                "INSERT INTO transacciones(user_id,tipo,monto,desc) VALUES(?,?,?,?)",
+                (uid, "recarga", llave["creditos"], f"Llave {text[:8]}...")
             )
-            generadas.append(k)
-        conn.commit()
-
-    nota_txt = f"\n📝 Nota: _{nota}_" if nota else ""
-    texto    = f"✅ *{cantidad} llave(s) generada(s) — {creditos} créditos c/u*{nota_txt}\n\n"
-    texto   += "\n".join(f"`{k}`" for k in generadas)
-    await update.message.reply_text(texto, parse_mode="Markdown")
-
-
-@admin_only
-async def cmd_addcuenta(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Agregar cuenta al stock. Uso: /addcuenta <tipo> <email> <password>"""
-    if not ctx.args or len(ctx.args) < 3:
         await update.message.reply_text(
-            "❌ Uso: `/addcuenta <tipo> <email> <password>`\n\n"
-            "Tipos: `individual` | `familiar`\n\n"
-            "Ejemplo:\n"
-            "`/addcuenta individual user@gmail.com MiPass123`",
+            f"✅ *¡Créditos recargados!*\n\n💰 `+{fmt_precio(llave['creditos'])}` agregados.",
             parse_mode="Markdown",
+            reply_markup=kb_usuario()
         )
         return
 
-    tipo  = ctx.args[0].lower()
-    email = ctx.args[1]
-    pwd   = " ".join(ctx.args[2:])   # permite espacios en la contraseña
+    await update.message.reply_text("Usa el menú 👇", reply_markup=kb_usuario())
 
-    if tipo not in ("individual", "familiar"):
-        await update.message.reply_text(
-            "❌ Tipo inválido. Usa `individual` o `familiar`.", parse_mode="Markdown"
-        )
-        return
+# ═══════════════════════════════════════════════════════════════════════════════
+# CALLBACKS — ADMIN
+# ═══════════════════════════════════════════════════════════════════════════════
+def es_admin(uid): return uid == ADMIN_ID
 
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO cuentas (tipo, email, password) VALUES (?,?,?)",
-            (tipo, email, pwd),
-        )
-        stock = conn.execute(
-            "SELECT COUNT(*) as n FROM cuentas WHERE tipo=? AND asignada=0", (tipo,)
-        ).fetchone()["n"]
-        conn.commit()
-
-    emoji = EMOJIS.get(tipo, "📦")
-    await update.message.reply_text(
-        f"✅ *Cuenta agregada al inventario*\n\n"
-        f"{emoji} Tipo: *{tipo}*\n"
-        f"📧 Email: `{email}`\n"
-        f"📦 Stock actual ({tipo}): *{stock}*",
-        parse_mode="Markdown",
+async def adm_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data.pop("adm_esperando", None)
+    await q.edit_message_text(
+        "🛡️ *Panel de Administración*\n\nElige una acción:",
+        parse_mode="Markdown", reply_markup=kb_admin()
     )
 
-
-@admin_only
-async def cmd_setprecio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cambiar precio. Uso: /setprecio <tipo> <precio>"""
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text(
-            "❌ Uso: `/setprecio <tipo> <precio>`\n\n"
-            "Ejemplo: `/setprecio familiar 120`",
-            parse_mode="Markdown",
-        )
-        return
-
-    tipo = ctx.args[0].lower()
-    try:
-        precio = int(ctx.args[1])
-        assert precio > 0
-    except (ValueError, AssertionError):
-        await update.message.reply_text("❌ Precio inválido.")
-        return
-
-    with get_conn() as conn:
-        if not conn.execute("SELECT 1 FROM precios WHERE tipo=?", (tipo,)).fetchone():
-            await update.message.reply_text(
-                f"❌ El tipo `{tipo}` no existe.", parse_mode="Markdown"
-            )
-            return
-        conn.execute("UPDATE precios SET precio=? WHERE tipo=?", (precio, tipo))
-        conn.commit()
-
-    emoji = EMOJIS.get(tipo, "📦")
-    await update.message.reply_text(
-        f"✅ Precio actualizado\n\n{emoji} *{tipo}* → *{precio} créditos*",
-        parse_mode="Markdown",
+async def adm_genkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "genkey"
+    await q.edit_message_text(
+        "🔑 *Generar llave*\n\nFormato: `<monto> [cantidad] [nota]`\n\n"
+        "Ejemplos:\n`3.50`\n`1.25 5`\n`2.00 3 VIP`",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
     )
 
-
-@admin_only
-async def cmd_addcreditos(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Añadir créditos manualmente. Uso: /addcreditos <user_id> <cantidad>"""
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text(
-            "❌ Uso: `/addcreditos <user_id> <cantidad>`\n\n"
-            "Obtén el ID del usuario con /usuarios",
-            parse_mode="Markdown",
-        )
-        return
-
-    try:
-        target_id = int(ctx.args[0])
-        cantidad  = int(ctx.args[1])
-        assert cantidad != 0
-    except (ValueError, AssertionError):
-        await update.message.reply_text("❌ Valores inválidos.")
-        return
-
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT nombre, creditos FROM usuarios WHERE user_id=?", (target_id,)
-        ).fetchone()
-        if not row:
-            await update.message.reply_text("❌ Usuario no encontrado.")
-            return
-        conn.execute(
-            "UPDATE usuarios SET creditos=creditos+? WHERE user_id=?",
-            (cantidad, target_id),
-        )
-        conn.commit()
-
-    nuevo   = row["creditos"] + cantidad
-    signo   = "+" if cantidad > 0 else ""
-    await update.message.reply_text(
-        f"✅ *Créditos actualizados*\n\n"
-        f"👤 *{row['nombre']}* (`{target_id}`)\n"
-        f"📊 {signo}{cantidad} créditos\n"
-        f"💳 Nuevo saldo: *{nuevo}*",
-        parse_mode="Markdown",
+async def adm_llaves(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    with get_conn() as c:
+        llaves = c.execute("SELECT * FROM llaves WHERE usada=0 ORDER BY rowid DESC LIMIT 20").fetchall()
+    if not llaves:
+        await q.edit_message_text("📭 No hay llaves disponibles.", reply_markup=kb_volver_admin()); return
+    lines = [
+        f"`{l['llave']}` — `{fmt_precio(l['creditos'])}`" + (f" — _{l['nota']}_" if l["nota"] else "")
+        for l in llaves
+    ]
+    await q.edit_message_text(
+        "🔑 *Llaves disponibles:*\n\n" + "\n".join(lines),
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
     )
 
+async def adm_addcuenta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "addcuenta"
+    await q.edit_message_text(
+        "➕ *Agregar cuentas*\n\n"
+        "Envía un archivo `.txt` o escribe directamente.\n\n"
+        "*Formato:*\n"
+        "```\n"
+        "individual_90\n"
+        "correo1@x.com nombre_user1\n"
+        "correo2@x.com nombre_user2 OtraPass\n\n"
+        "familiar_30\n"
+        "correo3@x.com nombre_user3\n"
+        "```\n"
+        "_Tipos: `individual_30`, `individual_90`, `familiar_30`, `dual_30`, `dual_90`_\n"
+        "_Contraseña por defecto: `Gowther2026`_",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
 
-@admin_only
-async def cmd_stock(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT tipo, "
-            "  SUM(CASE WHEN asignada=0 THEN 1 ELSE 0 END) as disponibles, "
-            "  SUM(asignada) as vendidas "
-            "FROM cuentas GROUP BY tipo"
+async def adm_stock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT tipo, COUNT(*) AS total, SUM(entregado) AS vendidas FROM cuentas GROUP BY tipo"
         ).fetchall()
-
     if not rows:
-        await update.message.reply_text("📦 El inventario está vacío.")
-        return
-
-    lines = ["📦 *Inventario de Cuentas*\n"]
+        await q.edit_message_text("📭 Sin cuentas en inventario.", reply_markup=kb_volver_admin()); return
+    lines = []
     for r in rows:
-        emoji = EMOJIS.get(r["tipo"], "📦")
+        t      = TIPOS.get(r["tipo"], {})
+        libres = r["total"] - (r["vendidas"] or 0)
         lines.append(
-            f"{emoji} *{r['tipo'].capitalize()}*\n"
-            f"  ✅ Disponibles: *{r['disponibles']}*\n"
-            f"  🛒 Vendidas:    *{r['vendidas']}*\n"
+            f"{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')}d* — "
+            f"✅`{libres}` libre | 🏷️`{r['vendidas'] or 0}` vendida"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-@admin_only
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    with get_conn() as conn:
-        total_usuarios = conn.execute("SELECT COUNT(*) as n FROM usuarios").fetchone()["n"]
-        total_ventas   = conn.execute("SELECT COUNT(*) as n FROM historial").fetchone()["n"]
-        creditos_usados = conn.execute(
-            "SELECT COALESCE(SUM(creditos_usados),0) as n FROM historial"
-        ).fetchone()["n"]
-        llaves_disp    = conn.execute("SELECT COUNT(*) as n FROM llaves WHERE usada=0").fetchone()["n"]
-        llaves_usadas  = conn.execute("SELECT COUNT(*) as n FROM llaves WHERE usada=1").fetchone()["n"]
-        bloqueados     = conn.execute("SELECT COUNT(*) as n FROM usuarios WHERE bloqueado=1").fetchone()["n"]
-
-    await update.message.reply_text(
-        f"📊 *Estadísticas Generales*\n\n"
-        f"👥 Usuarios totales:     *{total_usuarios}*\n"
-        f"🚫 Bloqueados:           *{bloqueados}*\n"
-        f"🛒 Ventas realizadas:    *{total_ventas}*\n"
-        f"💰 Créditos consumidos: *{creditos_usados}*\n\n"
-        f"🔑 Llaves disponibles:  *{llaves_disp}*\n"
-        f"🔑 Llaves usadas:       *{llaves_usadas}*",
-        parse_mode="Markdown",
+    await q.edit_message_text(
+        "📦 *Stock de cuentas:*\n\n" + "\n".join(lines),
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
     )
 
-
-@admin_only
-async def cmd_llaves(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT llave, creditos, nota FROM llaves WHERE usada=0 "
-            "ORDER BY creada_en DESC LIMIT 40"
-        ).fetchall()
-
-    if not rows:
-        await update.message.reply_text(
-            "🔑 No hay llaves disponibles.\n\nUsa `/genkey` para crear.", parse_mode="Markdown"
-        )
-        return
-
-    lines = [f"🔑 *Llaves Disponibles* ({len(rows)})\n"]
-    for r in rows:
-        nota = f" — _{r['nota']}_" if r["nota"] else ""
-        lines.append(f"`{r['llave']}` · {r['creditos']} créditos{nota}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-@admin_only
-async def cmd_usuarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT user_id, nombre, username, creditos, total_pedidos, bloqueado "
-            "FROM usuarios ORDER BY creado_en DESC LIMIT 20"
-        ).fetchall()
-
-    if not rows:
-        await update.message.reply_text("👥 Aún no hay usuarios registrados.")
-        return
-
-    lines = [f"👥 *Usuarios Registrados* ({len(rows)})\n"]
-    for r in rows:
-        uname    = f"@{r['username']}" if r["username"] else "—"
-        bloqueo  = " 🚫" if r["bloqueado"] else ""
-        lines.append(
-            f"• *{r['nombre']}* {uname}{bloqueo}\n"
-            f"  `{r['user_id']}` | 💳 {r['creditos']} | 🛒 {r['total_pedidos']} pedidos"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-@admin_only
-async def cmd_bloquear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Bloquear o desbloquear usuario. Uso: /bloquear <user_id>"""
-    if not ctx.args:
-        await update.message.reply_text(
-            "❌ Uso: `/bloquear <user_id>`\n\n"
-            "Obtén el ID con /usuarios. El comando alterna entre bloquear/desbloquear.",
-            parse_mode="Markdown",
-        )
-        return
-
-    try:
-        target_id = int(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ ID inválido.")
-        return
-
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT nombre, bloqueado FROM usuarios WHERE user_id=?", (target_id,)
-        ).fetchone()
-        if not row:
-            await update.message.reply_text("❌ Usuario no encontrado.")
-            return
-        nuevo_estado = 0 if row["bloqueado"] else 1
-        conn.execute(
-            "UPDATE usuarios SET bloqueado=? WHERE user_id=?", (nuevo_estado, target_id)
-        )
-        conn.commit()
-
-    estado = "🔒 *Bloqueado*" if nuevo_estado else "✅ *Desbloqueado*"
-    await update.message.reply_text(
-        f"{estado}: *{row['nombre']}* (`{target_id}`)", parse_mode="Markdown"
+async def adm_precios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    with get_conn() as c:
+        precios = c.execute("SELECT tipo, precio FROM precios ORDER BY tipo").fetchall()
+    lines = []
+    for p in precios:
+        t = TIPOS.get(p["tipo"], {})
+        lines.append(f"{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')}d* → `{fmt_precio(p['precio'])}`")
+    ctx.user_data["adm_esperando"] = "setprecio"
+    await q.edit_message_text(
+        "💵 *Precios actuales:*\n\n" + "\n".join(lines) +
+        "\n\n📝 Para cambiar envía: `<tipo> <precio>`\n"
+        "Ej: `individual_90 3.75`",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
     )
 
+async def adm_usuarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    with get_conn() as c:
+        users = c.execute("SELECT * FROM usuarios ORDER BY creado_en DESC LIMIT 20").fetchall()
+    if not users:
+        await q.edit_message_text("📭 Sin usuarios.", reply_markup=kb_volver_admin()); return
+    lines = []
+    for u in users:
+        estado = "🚫" if u["bloqueado"] else "✅"
+        uname  = f"@{u['username']}" if u["username"] else u["nombre"] or "N/A"
+        lines.append(f"{estado} `{u['user_id']}` {uname} — `{fmt_precio(u['creditos'])}`")
+    await q.edit_message_text(
+        "👥 *Últimos 20 usuarios:*\n\n" + "\n".join(lines),
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
 
-@admin_only
-async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Enviar mensaje a todos los usuarios. Uso: /broadcast <mensaje>"""
-    if not ctx.args:
-        await update.message.reply_text(
-            "❌ Uso: `/broadcast <mensaje>`", parse_mode="Markdown"
-        )
+async def adm_buscar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "buscar_usuario"
+    await q.edit_message_text(
+        "🔍 *Buscar usuario*\n\nEnvía el ID numérico o @username:",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
+
+async def adm_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    with get_conn() as c:
+        total_users   = c.execute("SELECT COUNT(*) AS n FROM usuarios").fetchone()["n"]
+        bloqueados    = c.execute("SELECT COUNT(*) AS n FROM usuarios WHERE bloqueado=1").fetchone()["n"]
+        total_cuentas = c.execute("SELECT COUNT(*) AS n FROM cuentas").fetchone()["n"]
+        vendidas      = c.execute("SELECT COUNT(*) AS n FROM cuentas WHERE entregado=1").fetchone()["n"]
+        ingresos      = c.execute("SELECT COALESCE(SUM(monto),0) AS s FROM transacciones WHERE tipo='compra'").fetchone()["s"]
+        llaves_gen    = c.execute("SELECT COUNT(*) AS n FROM llaves").fetchone()["n"]
+        llaves_usadas = c.execute("SELECT COUNT(*) AS n FROM llaves WHERE usada=1").fetchone()["n"]
+    await q.edit_message_text(
+        f"📊 *Estadísticas del bot*\n\n"
+        f"👥 Usuarios: `{total_users}` (🚫 bloqueados: `{bloqueados}`)\n"
+        f"📦 Cuentas: `{total_cuentas}` (vendidas: `{vendidas}`)\n"
+        f"🔑 Llaves: `{llaves_gen}` (usadas: `{llaves_usadas}`)\n"
+        f"💵 Ingresos: `{fmt_precio(abs(ingresos))}`",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
+
+async def adm_broadcast_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "broadcast"
+    await q.edit_message_text(
+        "📢 *Broadcast*\n\nEscribe el mensaje a enviar a todos los usuarios:",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
+
+async def adm_creditos_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "dar_creditos"
+    await q.edit_message_text(
+        "💰 *Dar créditos*\n\nFormato: `<user_id> <monto>`\nEj: `123456789 5.50`",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
+
+async def adm_bloquear_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    ctx.user_data["adm_esperando"] = "bloquear"
+    await q.edit_message_text(
+        "🚫 *Bloquear / Desbloquear*\n\nEnvía el user_id:",
+        parse_mode="Markdown", reply_markup=kb_volver_admin()
+    )
+
+async def adm_toggle_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if not es_admin(q.from_user.id): return
+    target = int(q.data.split("_")[-1])
+    with get_conn() as c:
+        u = c.execute("SELECT * FROM usuarios WHERE user_id=?", (target,)).fetchone()
+        if not u:
+            await q.answer("❌ No encontrado", show_alert=True); return
+        nuevo = 0 if u["bloqueado"] else 1
+        c.execute("UPDATE usuarios SET bloqueado=? WHERE user_id=?", (nuevo, target))
+    estado = "🚫 Bloqueado" if nuevo else "✅ Desbloqueado"
+    await q.answer(f"{estado}: {target}", show_alert=True)
+
+# ─── Mensajes admin ───────────────────────────────────────────────────────────
+async def msg_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = (update.message.text or "").strip()
+    esp  = ctx.user_data.get("adm_esperando")
+    if not esp:
         return
 
-    mensaje = " ".join(ctx.args)
-
-    with get_conn() as conn:
-        user_ids = [
-            r["user_id"]
-            for r in conn.execute(
-                "SELECT user_id FROM usuarios WHERE bloqueado=0"
-            ).fetchall()
-        ]
-
-    enviados = fallidos = 0
-    for uid in user_ids:
+    # ── Generar llave ──────────────────────────────────────────────────────────
+    if esp == "genkey":
+        ctx.user_data.pop("adm_esperando")
+        parts = text.split()
         try:
-            await ctx.bot.send_message(
-                uid,
-                f"📣 *Mensaje del administrador:*\n\n{mensaje}",
-                parse_mode="Markdown",
-            )
-            enviados += 1
+            monto    = float(parts[0])
+            cantidad = int(parts[1]) if len(parts) > 1 else 1
+            nota     = " ".join(parts[2:]) if len(parts) > 2 else ""
         except Exception:
-            fallidos += 1
-
-    await update.message.reply_text(
-        f"📣 *Broadcast completado*\n\n✅ Enviados: {enviados}\n❌ Fallidos: {fallidos}",
-        parse_mode="Markdown",
-    )
-
-
-# ═══════════════════════════════════════════════
-#  CALLBACK — BOTONES INLINE
-# ═══════════════════════════════════════════════
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    q    = update.callback_query
-    user = q.from_user
-    registrar_si_nuevo(user)
-    await q.answer()
-
-    if is_bloqueado(user.id):
-        await q.message.reply_text("🚫 Tu acceso ha sido suspendido.")
+            await update.message.reply_text("❌ Formato incorrecto.\nEj: `2.50 3 VIP`",
+                parse_mode="Markdown", reply_markup=kb_admin()); return
+        chars    = string.ascii_uppercase + string.digits
+        generadas = []
+        with get_conn() as c:
+            for _ in range(cantidad):
+                llave = "".join(secrets.choice(chars) for _ in range(16))
+                c.execute("INSERT INTO llaves(llave,creditos,nota) VALUES(?,?,?)", (llave, monto, nota))
+                generadas.append(llave)
+        lines = "\n".join(f"`{l}`" for l in generadas)
+        await update.message.reply_text(
+            f"✅ *{cantidad}* llave(s) de `{fmt_precio(monto)}`:\n\n{lines}",
+            parse_mode="Markdown", reply_markup=kb_admin())
         return
 
-    data = q.data
+    # ── Cambiar precio ─────────────────────────────────────────────────────────
+    if esp == "setprecio":
+        ctx.user_data.pop("adm_esperando")
+        parts = text.split()
+        if len(parts) != 2 or parts[0] not in TIPOS:
+            await update.message.reply_text("❌ Formato: `<tipo> <precio>`\nEj: `individual_90 3.75`",
+                parse_mode="Markdown", reply_markup=kb_admin()); return
+        try:
+            nuevo = float(parts[1])
+        except Exception:
+            await update.message.reply_text("❌ Precio inválido.", reply_markup=kb_admin()); return
+        with get_conn() as c:
+            c.execute("INSERT OR REPLACE INTO precios(tipo,precio) VALUES(?,?)", (parts[0], nuevo))
+        t = TIPOS[parts[0]]
+        await update.message.reply_text(
+            f"✅ {t['emoji']} *{t['nombre']} {t['dias']}d* → `{fmt_precio(nuevo)}`",
+            parse_mode="Markdown", reply_markup=kb_admin())
+        return
 
-    if data == "ver_creditos":
-        creds = get_creditos(user.id)
-        await q.message.reply_text(
-            f"💳 *Tu Saldo:* *{creds} créditos*", parse_mode="Markdown"
-        )
+    # ── Agregar cuentas (texto) ────────────────────────────────────────────────
+    if esp == "addcuenta":
+        ctx.user_data.pop("adm_esperando")
+        resultado = parsear_y_guardar_cuentas(text)
+        await update.message.reply_text(resultado, parse_mode="Markdown", reply_markup=kb_admin())
+        return
 
-    elif data == "ver_precios":
-        with get_conn() as conn:
-            precios = conn.execute("SELECT tipo, precio, descripcion FROM precios").fetchall()
-            disp    = {
-                r["tipo"]: r["n"]
-                for r in conn.execute(
-                    "SELECT tipo, COUNT(*) as n FROM cuentas WHERE asignada=0 GROUP BY tipo"
-                ).fetchall()
-            }
-        lines = ["💰 *Lista de Precios*\n"]
-        for p in precios:
-            emoji = EMOJIS.get(p["tipo"], "📦")
-            lines.append(
-                f"{emoji} *{p['tipo'].capitalize()}*\n"
-                f"💲 {p['precio']} créditos | 📦 {disp.get(p['tipo'], 0)} en stock\n"
-            )
-        await q.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-    elif data == "menu_pedir":
-        kb = [[
-            InlineKeyboardButton("👤 Individual", callback_data="pedir_individual"),
-            InlineKeyboardButton("👨‍👩‍👧‍👦 Familiar",  callback_data="pedir_familiar"),
-        ]]
-        await q.message.reply_text(
-            "🛒 *¿Qué tipo de cuenta deseas?*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb),
-        )
-
-    elif data in ("pedir_individual", "pedir_familiar"):
-        tipo = data.split("_", 1)[1]
-        await _entregar_cuenta(q.message, user.id, tipo)
-
-    elif data == "mis_cuentas":
-        with get_conn() as conn:
-            cuentas = conn.execute(
-                "SELECT tipo, email, password, asignada_en "
-                "FROM cuentas WHERE asignada_a=? ORDER BY asignada_en DESC",
-                (user.id,),
+    # ── Buscar usuario ─────────────────────────────────────────────────────────
+    if esp == "buscar_usuario":
+        ctx.user_data.pop("adm_esperando")
+        with get_conn() as c:
+            if text.startswith("@"):
+                u = c.execute("SELECT * FROM usuarios WHERE username=?", (text[1:],)).fetchone()
+            elif text.isdigit():
+                u = c.execute("SELECT * FROM usuarios WHERE user_id=?", (int(text),)).fetchone()
+            else:
+                u = c.execute(
+                    "SELECT * FROM usuarios WHERE username LIKE ? OR nombre LIKE ?",
+                    (f"%{text}%", f"%{text}%")
+                ).fetchone()
+            if not u:
+                await update.message.reply_text("❌ Usuario no encontrado.", reply_markup=kb_admin()); return
+            cuentas = c.execute(
+                "SELECT * FROM cuentas WHERE entregado_a=? ORDER BY fecha_entrega DESC", (u["user_id"],)
             ).fetchall()
-        if not cuentas:
-            await q.message.reply_text("📋 No tienes cuentas aún.")
-            return
-        lines = [f"📋 *Tus Cuentas* ({len(cuentas)})\n"]
-        for c in cuentas:
-            emoji = EMOJIS.get(c["tipo"], "📦")
-            lines.append(
-                f"{emoji} *{c['tipo'].capitalize()}*\n"
-                f"📧 `{c['email']}`\n"
-                f"🔒 `{c['password']}`\n"
+
+        estado = "🚫 Bloqueado" if u["bloqueado"] else "✅ Activo"
+        uname  = f"@{u['username']}" if u["username"] else "sin username"
+        info   = (
+            f"🔍 *Perfil del usuario*\n\n"
+            f"🆔 ID: `{u['user_id']}`\n"
+            f"👤 {u['nombre'] or 'N/A'} ({uname})\n"
+            f"💵 Créditos: `{fmt_precio(u['creditos'])}`\n"
+            f"📅 Registrado: `{u['creado_en']}`\n"
+            f"Estado: {estado}\n"
+            f"📦 Cuentas compradas: `{len(cuentas)}`\n"
+        )
+        if cuentas:
+            info += "\n*📋 Cuentas:*\n"
+            for cu in cuentas[:10]:
+                t = TIPOS.get(cu["tipo"], {})
+                garantia_txt = f"   👤 `{cu['nombre_user']}`\n" if cu["nombre_user"] else ""
+                info += (
+                    f"\n{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')}d* | "
+                    f"Fin: `{cu['fecha_fin'] or 'N/A'}`\n"
+                    + garantia_txt +
+                    f"   📧 `{cu['correo']}`\n"
+                    f"   🔒 `{cu['contrasena']}`\n"
+                )
+        btns = [
+            [InlineKeyboardButton(
+                "🔄 Bloquear/Desbloquear",
+                callback_data=f"adm_toggle_{u['user_id']}"
+            )],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="adm_back")]
+        ]
+        await update.message.reply_text(info, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(btns))
+        return
+
+    # ── Dar créditos ───────────────────────────────────────────────────────────
+    if esp == "dar_creditos":
+        ctx.user_data.pop("adm_esperando")
+        parts = text.split()
+        if len(parts) != 2:
+            await update.message.reply_text("❌ Formato: `<user_id> <monto>`",
+                parse_mode="Markdown", reply_markup=kb_admin()); return
+        try:
+            target_id = int(parts[0])
+            monto     = float(parts[1])
+        except Exception:
+            await update.message.reply_text("❌ Datos inválidos.", reply_markup=kb_admin()); return
+        with get_conn() as c:
+            u = c.execute("SELECT * FROM usuarios WHERE user_id=?", (target_id,)).fetchone()
+            if not u:
+                await update.message.reply_text("❌ Usuario no encontrado.", reply_markup=kb_admin()); return
+            c.execute("UPDATE usuarios SET creditos=creditos+? WHERE user_id=?", (monto, target_id))
+            c.execute(
+                "INSERT INTO transacciones(user_id,tipo,monto,desc) VALUES(?,?,?,?)",
+                (target_id, "recarga_admin", monto, "Admin recarga")
             )
-        await q.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text(
+            f"✅ `+{fmt_precio(monto)}` agregados a `{target_id}`",
+            parse_mode="Markdown", reply_markup=kb_admin())
+        return
 
+    # ── Bloquear usuario ───────────────────────────────────────────────────────
+    if esp == "bloquear":
+        ctx.user_data.pop("adm_esperando")
+        if not text.isdigit():
+            await update.message.reply_text("❌ Envía un user_id numérico.", reply_markup=kb_admin()); return
+        target = int(text)
+        with get_conn() as c:
+            u = c.execute("SELECT * FROM usuarios WHERE user_id=?", (target,)).fetchone()
+            if not u:
+                await update.message.reply_text("❌ No encontrado.", reply_markup=kb_admin()); return
+            nuevo = 0 if u["bloqueado"] else 1
+            c.execute("UPDATE usuarios SET bloqueado=? WHERE user_id=?", (nuevo, target))
+        estado = "🚫 Bloqueado" if nuevo else "✅ Desbloqueado"
+        await update.message.reply_text(f"{estado}: `{target}`",
+            parse_mode="Markdown", reply_markup=kb_admin())
+        return
 
-# ═══════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════
-def main() -> None:
-    if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN no configurado. Revisa las variables de entorno.")
-    if ADMIN_ID == 0:
-        raise SystemExit("❌ ADMIN_ID no configurado. Revisa las variables de entorno.")
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    if esp == "broadcast":
+        ctx.user_data.pop("adm_esperando")
+        with get_conn() as c:
+            users = c.execute("SELECT user_id FROM usuarios WHERE bloqueado=0").fetchall()
+        ok = fail = 0
+        for u in users:
+            try:
+                await ctx.bot.send_message(chat_id=u["user_id"], text=text)
+                ok += 1
+            except Exception:
+                fail += 1
+        await update.message.reply_text(
+            f"📢 Enviado: ✅ {ok} | ❌ {fail}",
+            reply_markup=kb_admin())
+        return
 
+# ─── Handler de archivos .txt (admin) ─────────────────────────────────────────
+async def adm_doc_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith(".txt"):
+        return
+    ctx.user_data.pop("adm_esperando", None)
+    file    = await doc.get_file()
+    content = await file.download_as_bytearray()
+    texto   = content.decode("utf-8", errors="ignore")
+    resultado = parsear_y_guardar_cuentas(texto)
+    await update.message.reply_text(resultado, parse_mode="Markdown", reply_markup=kb_admin())
+
+# ─── Router de callbacks ──────────────────────────────────────────────────────
+async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+
+    routes = {
+        "mis_creditos":   cb_mis_creditos,
+        "ver_precios":    cb_ver_precios,
+        "pedir_menu":     cb_pedir_menu,
+        "mis_cuentas":    cb_mis_cuentas,
+        "canjear_prompt": cb_canjear_prompt,
+        "menu_principal": cb_menu_principal,
+        "adm_back":       adm_back,
+        "adm_genkey":     adm_genkey,
+        "adm_llaves":     adm_llaves,
+        "adm_addcuenta":  adm_addcuenta,
+        "adm_stock":      adm_stock,
+        "adm_precios":    adm_precios,
+        "adm_usuarios":   adm_usuarios,
+        "adm_buscar":     adm_buscar,
+        "adm_stats":      adm_stats,
+        "adm_broadcast":  adm_broadcast_btn,
+        "adm_creditos":   adm_creditos_btn,
+        "adm_bloquear":   adm_bloquear_btn,
+    }
+
+    if data in routes:
+        await routes[data](update, ctx)
+    elif data.startswith("pedir_"):
+        await cb_pedir_tipo(update, ctx)
+    elif data.startswith("adm_toggle_"):
+        await adm_toggle_user(update, ctx)
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
     init_db()
-
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ── Comandos de usuario
-    app.add_handler(CommandHandler("start",      cmd_start))
-    app.add_handler(CommandHandler("creditos",   cmd_creditos))
-    app.add_handler(CommandHandler("precios",    cmd_precios))
-    app.add_handler(CommandHandler("canjear",    cmd_canjear))
-    app.add_handler(CommandHandler("pedir",      cmd_pedir))
-    app.add_handler(CommandHandler("miscuentas", cmd_miscuentas))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("txt") & filters.User(ADMIN_ID),
+        adm_doc_handler
+    ))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+        msg_admin
+    ))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        msg_usuario
+    ))
 
-    # ── Comandos de admin
-    app.add_handler(CommandHandler("admin",       cmd_admin))
-    app.add_handler(CommandHandler("genkey",      cmd_genkey))
-    app.add_handler(CommandHandler("addcuenta",   cmd_addcuenta))
-    app.add_handler(CommandHandler("setprecio",   cmd_setprecio))
-    app.add_handler(CommandHandler("addcreditos", cmd_addcreditos))
-    app.add_handler(CommandHandler("stock",       cmd_stock))
-    app.add_handler(CommandHandler("stats",       cmd_stats))
-    app.add_handler(CommandHandler("llaves",      cmd_llaves))
-    app.add_handler(CommandHandler("usuarios",    cmd_usuarios))
-    app.add_handler(CommandHandler("bloquear",    cmd_bloquear))
-    app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
-
-    # ── Botones inline
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    logger.info("🤖 Bot en marcha… (polling)")
+    logger.info("🤖 Bot en marcha... (polling)")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
