@@ -239,11 +239,6 @@ def parsear_y_guardar_cuentas(texto):
             errores += 1
             continue
 
-        if "gowtherxax.com" in correo.lower():
-            logger.warning(f"Cuenta rechazada (dominio no permitido): {correo}")
-            errores += 1
-            continue
-
         try:
             with get_conn() as c:
                 cols = {r[1]: r[2].upper() for r in c.execute("PRAGMA table_info(cuentas)").fetchall()}
