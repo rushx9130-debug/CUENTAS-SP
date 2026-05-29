@@ -142,63 +142,94 @@ def fmt_precio(p):
 def fecha_fin_str(dias):
     return (datetime.now() + timedelta(days=dias)).strftime("%d/%m/%Y")
 
+
+def normalizar_linea_cuenta(linea: str) -> str:
+    linea = linea.strip()
+    m = re.search(r'mailto:([^\)\]\s]+)', linea, flags=re.I)
+    if m:
+        correo = m.group(1)
+        resto = re.sub(r'\[[^\]]*\]\(mailto:[^\)]+\)', correo, linea, flags=re.I)
+        linea = resto.strip()
+    linea = linea.replace('<', ' ').replace('>', ' ').replace('(', ' ').replace(')', ' ').replace('[', ' ').replace(']', ' ')
+    linea = re.sub(r'\s+', ' ', linea).strip()
+    return linea
+
 def parsear_y_guardar_cuentas(texto):
     tipo_actual = None
-    insertadas  = 0
-    errores     = 0
+    insertadas = 0
+    errores = 0
     tipo_map = {
         "individual": "individual_90",
-        "familiar":   "familiar_30",
-        "dual":       "dual_90",
+        "familiar": "familiar_30",
+        "dual": "dual_90",
+        "individual30": "individual_30",
+        "individual90": "individual_90",
+        "familiar30": "familiar_30",
+        "dual30": "dual_30",
+        "dual90": "dual_90",
     }
-    for linea in texto.splitlines():
-        linea = linea.strip()
+
+    for raw in texto.splitlines():
+        linea = raw.strip()
         if not linea:
             continue
-        linea_lower = linea.lower()
-        # detectar cabecera de tipo
+
+        linea_lower = linea.lower().strip()
         if linea_lower in TIPOS:
             tipo_actual = linea_lower
             continue
-        matched = False
-        for k, v in tipo_map.items():
-            if linea_lower == k:
-                tipo_actual = v
-                matched = True
-                break
-        if matched:
+        if linea_lower in tipo_map:
+            tipo_actual = tipo_map[linea_lower]
             continue
-        # línea de cuenta
-        if tipo_actual and ("@" in linea or re.match(r'\S+@\S+', linea)):
-            parts    = linea.split()
-            correo   = parts[0]
-            nombre_u = parts[1] if len(parts) > 1 else ""
-            passw    = parts[2] if len(parts) > 2 else PASSWORD
-            try:
-                with get_conn() as c:
-                    # asegurar columnas antes de insertar
-                    _cols = [r[1] for r in c.execute("PRAGMA table_info(cuentas)").fetchall()]
-                    for _col, _tipo_col, _def in [
-                        ("nombre_user",   "TEXT",    ""),
-                        ("entregado",     "INTEGER", "0"),
-                        ("entregado_a",   "INTEGER", ""),
-                        ("fecha_entrega", "TEXT",    ""),
-                        ("fecha_fin",     "TEXT",    ""),
-                    ]:
-                        if _col not in _cols:
-                            _dsql = f" DEFAULT {_def}" if _def != "" else ""
-                            c.execute(f"ALTER TABLE cuentas ADD COLUMN {_col} TEXT{_dsql}")
-                    c.execute(
-                        "INSERT INTO cuentas(tipo,correo,contrasena,nombre_user) VALUES(?,?,?,?)",
-                        (tipo_actual, correo, passw, nombre_u)
-                    )
-                insertadas += 1
-            except Exception as e:
-                logger.error(f"Error insertando cuenta: {e}")
-                errores += 1
+
+        linea = normalizar_linea_cuenta(linea)
+        if not tipo_actual:
+            continue
+        if '@' not in linea:
+            continue
+
+        parts = linea.split()
+        if len(parts) < 2:
+            logger.error(f"Linea inválida sin nombre_user: {raw}")
+            errores += 1
+            continue
+
+        correo = parts[0].strip()
+        nombre_u = parts[1].strip()
+        passw = parts[2].strip() if len(parts) > 2 else PASSWORD
+
+        if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', correo):
+            logger.error(f"Correo inválido: {correo} | linea={raw}")
+            errores += 1
+            continue
+
+        try:
+            with get_conn() as c:
+                cols = {r[1]: r[2].upper() for r in c.execute("PRAGMA table_info(cuentas)").fetchall()}
+                migraciones = [
+                    ("nombre_user", "TEXT", None),
+                    ("entregado", "INTEGER", "0"),
+                    ("entregado_a", "INTEGER", None),
+                    ("fecha_entrega", "TEXT", None),
+                    ("fecha_fin", "TEXT", None),
+                ]
+                for col, tipo_col, default in migraciones:
+                    if col not in cols:
+                        default_sql = f" DEFAULT {default}" if default is not None else ""
+                        c.execute(f"ALTER TABLE cuentas ADD COLUMN {col} {tipo_col}{default_sql}")
+                c.execute(
+                    "INSERT INTO cuentas(tipo,correo,contrasena,nombre_user) VALUES(?,?,?,?)",
+                    (tipo_actual, correo, passw, nombre_u)
+                )
+            insertadas += 1
+        except Exception as e:
+            logger.error(f"Error insertando cuenta | linea={raw} | normalizada={linea} | error={e}")
+            errores += 1
+
     if insertadas == 0 and errores == 0:
         return "⚠️ No se encontraron cuentas válidas."
-    return f"✅ *{insertadas}* cuenta(s) agregada(s)" + (f"\n⚠️ {errores} error(es)" if errores else "")
+    return f"✅ {insertadas} cuenta(s) agregada(s)" + (f"\n⚠️ {errores} error(es)" if errores else "")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TECLADOS
