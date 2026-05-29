@@ -220,10 +220,16 @@ def parsear_y_guardar_cuentas(texto):
                     if col not in cols:
                         default_sql = f" DEFAULT {default}" if default is not None else ""
                         c.execute(f"ALTER TABLE cuentas ADD COLUMN {col} {tipo_col}{default_sql}")
-                c.execute(
-                    "INSERT INTO cuentas(tipo,correo,contrasena,nombre_user) VALUES(?,?,?,?)",
-                    (tipo_actual, correo, passw, nombre_u)
-                )
+                cols = {r[1]: r[2].upper() for r in c.execute("PRAGMA table_info(cuentas)").fetchall()}
+
+                # Compatibilidad con esquemas viejos: algunas DB usan email en vez de correo
+                campo_correo = "correo" if "correo" in cols else ("email" if "email" in cols else None)
+                if not campo_correo:
+                    c.execute("ALTER TABLE cuentas ADD COLUMN correo TEXT")
+                    campo_correo = "correo"
+
+                insert_sql = f"INSERT INTO cuentas(tipo,{campo_correo},contrasena,nombre_user) VALUES(?,?,?,?)"
+                c.execute(insert_sql, (tipo_actual, correo, passw, nombre_u))
             insertadas += 1
         except Exception as e:
             logger.error(f"Error insertando cuenta | linea={raw} | normalizada={linea} | error={e}")
@@ -390,7 +396,7 @@ async def cb_pedir_tipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📦 Cuenta *{t['nombre']} {t['dias']} días*\n\n"
         f"📅 Fin  `{ff}`\n\n"
         + garantia_txt +
-        f"📧 Correo:\n`{cuenta['correo']}`\n\n"
+        f"📧 Correo:\n`{(cuenta['correo'] if 'correo' in cuenta.keys() else cuenta['email'])}`\n\n"
         f"🔒 Contraseña\n`{cuenta['contrasena']}`\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -748,7 +754,7 @@ async def msg_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"\n{t.get('emoji','📦')} *{t.get('nombre','?')} {t.get('dias','')}d* | "
                     f"Fin: `{cu['fecha_fin'] or 'N/A'}`\n"
                     + garantia_txt +
-                    f"   📧 `{cu['correo']}`\n"
+                    f"   📧 `{(cu['correo'] if 'correo' in cu.keys() else cu['email'])}`\n"
                     f"   🔒 `{cu['contrasena']}`\n"
                 )
         btns = [
