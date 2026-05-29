@@ -72,6 +72,20 @@ def init_db():
             desc    TEXT,
             fecha   TEXT DEFAULT (datetime('now'))
         );
+        """)
+
+        # Migrate precios table if its schema no longer matches (e.g. old 3-column version).
+        # We detect a mismatch by checking the column count reported by PRAGMA table_info.
+        col_count = c.execute("SELECT COUNT(*) FROM pragma_table_info('precios')").fetchone()[0]
+        if col_count != 2:
+            logger.warning(
+                f"⚠️  precios table has {col_count} column(s) instead of 2 — "
+                "dropping and recreating to match current schema."
+            )
+            c.execute("DROP TABLE precios")
+            c.execute("CREATE TABLE precios (tipo TEXT PRIMARY KEY, precio REAL)")
+
+        c.executescript("""
         INSERT OR IGNORE INTO precios VALUES ('individual_30', 1.25);
         INSERT OR IGNORE INTO precios VALUES ('individual_90', 3.00);
         INSERT OR IGNORE INTO precios VALUES ('familiar_30',   2.00);
