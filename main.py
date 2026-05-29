@@ -74,24 +74,46 @@ def init_db():
         );
         """)
 
-        # Migrate precios table if its schema no longer matches (e.g. old 3-column version).
-        # We detect a mismatch by checking the column count reported by PRAGMA table_info.
-        col_count = c.execute("SELECT COUNT(*) FROM pragma_table_info('precios')").fetchone()[0]
-        if col_count != 2:
-            logger.warning(
-                f"⚠️  precios table has {col_count} column(s) instead of 2 — "
-                "dropping and recreating to match current schema."
-            )
-            c.execute("DROP TABLE precios")
+        # Migración tabla precios: si tiene columnas extra (versión vieja), recrear
+        cols_p = c.execute("PRAGMA table_info(precios)").fetchall()
+        if len(cols_p) != 2:
+            logger.info("🔧 Migrando tabla precios...")
+            filas = []
+            try:
+                filas = c.execute("SELECT tipo, precio FROM precios").fetchall()
+            except Exception:
+                pass
+            c.execute("DROP TABLE IF EXISTS precios")
             c.execute("CREATE TABLE precios (tipo TEXT PRIMARY KEY, precio REAL)")
+            for f in filas:
+                c.execute("INSERT OR IGNORE INTO precios(tipo,precio) VALUES(?,?)", (f[0], f[1]))
 
-        c.executescript("""
-        INSERT OR IGNORE INTO precios VALUES ('individual_30', 1.25);
-        INSERT OR IGNORE INTO precios VALUES ('individual_90', 3.00);
-        INSERT OR IGNORE INTO precios VALUES ('familiar_30',   2.00);
-        INSERT OR IGNORE INTO precios VALUES ('dual_30',       1.50);
-        INSERT OR IGNORE INTO precios VALUES ('dual_90',       3.50);
-        """)
+        # Migración tabla cuentas: agregar columnas faltantes si no existen
+        cols_c = [r[1] for r in c.execute("PRAGMA table_info(cuentas)").fetchall()]
+        migraciones_cuentas = [
+            ("nombre_user",   "TEXT",    ""),
+            ("entregado",     "INTEGER", "0"),
+            ("entregado_a",   "INTEGER", ""),
+            ("fecha_entrega", "TEXT",    ""),
+            ("fecha_fin",     "TEXT",    ""),
+        ]
+        for col, tipo_col, default in migraciones_cuentas:
+            if col not in cols_c:
+                default_sql = f" DEFAULT {default}" if default != "" else ""
+                c.execute(f"ALTER TABLE cuentas ADD COLUMN {col} {tipo_col}{default_sql}")
+                logger.info(f"🔧 Columna agregada a cuentas: {col}")
+
+        # Insertar precios por defecto si no existen
+        defaults = [
+            ("individual_30", 1.25),
+            ("individual_90", 3.00),
+            ("familiar_30",   2.00),
+            ("dual_30",       1.50),
+            ("dual_90",       3.50),
+        ]
+        for tipo, precio in defaults:
+            c.execute("INSERT OR IGNORE INTO precios(tipo,precio) VALUES(?,?)", (tipo, precio))
+
     logger.info(f"✅ DB lista: {DB_PATH}")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -445,21 +467,17 @@ async def adm_addcuenta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if not es_admin(q.from_user.id): return
     ctx.user_data["adm_esperando"] = "addcuenta"
-    await q.edit_message_text(
+    texto_add = (
         "➕ *Agregar cuentas*\n\n"
-        "Envía un archivo `.txt` o escribe directamente.\n\n"
-        "*Formato:*\n"
-        "```\n"
-        "individual_90\n"
-        "correo1@x.com nombre_user1\n"
-        "correo2@x.com nombre_user2 OtraPass\n\n"
-        "familiar_30\n"
-        "correo3@x.com nombre_user3\n"
-        "```\n"
-        "_Tipos: `individual_30`, `individual_90`, `familiar_30`, `dual_30`, `dual_90`_\n"
-        "_Contraseña por defecto: `Gowther2026`_",
-        parse_mode="Markdown", reply_markup=kb_volver_admin()
+        "Envía un archivo .txt o escribe directamente.\n\n"
+        "Tipos válidos:\n"
+        "individual30, individual90, familiar30, dual30, dual90\n\n"
+        "Formato por línea:\n"
+        "  correo@x.com nombre_usuario\n"
+        "  correo@x.com nombre_usuario Contrasena\n\n"
+        "Contraseña por defecto: Gowther2026"
     )
+    await q.edit_message_text(texto_add, parse_mode="Markdown", reply_markup=kb_volver_admin())
 
 async def adm_stock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
